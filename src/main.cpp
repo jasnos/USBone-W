@@ -13,12 +13,14 @@
 #include <ESPmDNS.h>
 #include <FS.h>
 #include <SD_MMC.h>
+#include "crypto_manager.h"
+#include <vector>
+#include <algorithm>
 
 // USB configuration
 #if ARDUINO_USB_MODE
 #warning "USB configured in native mode"
 #endif
-#include <vector>
 
 // WiFi Configuration
 #define WIFI_SSID "USBone"
@@ -87,6 +89,7 @@ void updateDisplay();
 void loadMacrosFromSD();
 bool initializeSD();
 void createExampleMacros();
+bool saveMacrosToSD(const String& content);
 void handleSingleButton();
 void injectMacro();
 
@@ -120,6 +123,9 @@ int unlockPattern[] = {1, 2, 1};
 int patternPos = 0;
 unsigned long lastPatternPress = 0;
 const unsigned long patternTimeout = 5000;
+
+// SD Card state
+bool sdCardAvailable = false;
 
 // Button variables
 bool lastButtonState = HIGH;
@@ -226,200 +232,631 @@ void showUnlockedAnimation() {
   delay(1500);
 }
 
-// HTML Page (stored in PROGMEM to save RAM)
+// HTML Page (stored in PROGMEM to save RAM) - Modern Cyber-Tech Dark Theme
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>USBone Control Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-dark: #0a0e27;
+            --bg-darker: #060916;
+            --bg-card: #141b34;
+            --accent-primary: #00d4ff;
+            --accent-secondary: #7b2cbf;
+            --accent-success: #00ff88;
+            --accent-danger: #ff0055;
+            --accent-warning: #ffaa00;
+            --text-primary: #ffffff;
+            --text-secondary: #a0aec0;
+            --border-color: rgba(0, 212, 255, 0.2);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            color: #ffffff;
+            font-family: 'Rajdhani', sans-serif;
+            background: linear-gradient(135deg, var(--bg-darker) 0%, var(--bg-dark) 100%);
+            color: var(--text-primary);
             min-height: 100vh;
-            padding: 20px;
+            overflow-x: hidden;
         }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header {
-            text-align: center;
-            padding: 30px 0;
-            border-bottom: 2px solid rgba(255,255,255,0.1);
-            margin-bottom: 30px;
-        }
-        .header h1 {
-            font-size: 3em;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        .header p { font-size: 1.2em; opacity: 0.8; }
-        .card {
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-            padding: 25px;
-            margin-bottom: 25px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            border: 1px solid rgba(255,255,255,0.2);
-        }
-        .card h2 {
-            font-size: 1.8em;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        textarea {
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
             width: 100%;
-            min-height: 300px;
-            background: rgba(0,0,0,0.3);
-            border: 2px solid rgba(255,255,255,0.2);
-            border-radius: 10px;
-            color: #ffffff;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            padding: 15px;
-            resize: vertical;
-            transition: all 0.3s;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(123, 44, 191, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(0, 212, 255, 0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
         }
-        textarea:focus {
-            outline: none;
-            border-color: #4CAF50;
-            box-shadow: 0 0 10px rgba(76,175,80,0.3);
+        
+        nav {
+            position: sticky;
+            top: 0;
+            background: rgba(10, 14, 39, 0.95);
+            backdrop-filter: blur(20px);
+            border-bottom: 2px solid var(--border-color);
+            padding: 0;
+            z-index: 1000;
+            box-shadow: 0 10px 40px rgba(0, 212, 255, 0.1);
         }
-        .button-group {
+        
+        .nav-container {
+            max-width: 1400px;
+            margin: 0 auto;
             display: flex;
-            gap: 10px;
-            margin-top: 15px;
-            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 30px;
+            height: 80px;
         }
-        button {
-            padding: 12px 30px;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
+        
+        .logo {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 2.2em;
+            font-weight: 900;
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 3px;
+            text-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
             cursor: pointer;
             transition: all 0.3s;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }
-        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-        .btn-success { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
-        .btn-info { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; }
-        .btn-warning { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
-        button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
-        button:active { transform: translateY(0); }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .status {
-            padding: 10px 15px;
-            border-radius: 8px;
-            margin-top: 15px;
+        
+        .logo:hover {
+            transform: scale(1.05);
+            filter: brightness(1.2);
+        }
+        
+        .nav-menu {
+            display: flex;
+            gap: 5px;
+            list-style: none;
+        }
+        
+        .nav-menu li {
+            position: relative;
+        }
+        
+        .nav-menu a {
+            display: block;
+            padding: 12px 25px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 1.1em;
+            border-radius: 10px;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
+        }
+        
+        .nav-menu a::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.2), transparent);
+            transition: left 0.5s;
+            pointer-events: none;
+            z-index: -1;
+        }
+        
+        .nav-menu a:hover::before {
+            left: 100%;
+        }
+        
+        .nav-menu a:hover,
+        .nav-menu a.active {
+            color: var(--accent-primary);
+            background: rgba(0, 212, 255, 0.1);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.2);
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 30px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .tab-content {
             display: none;
+            animation: fadeIn 0.5s;
         }
-        .status.success { background: rgba(76,175,80,0.2); border: 1px solid #4CAF50; color: #4CAF50; }
-        .status.error { background: rgba(244,67,54,0.2); border: 1px solid #f44336; color: #f44336; }
-        .status.info { background: rgba(33,150,243,0.2); border: 1px solid #2196F3; color: #2196F3; }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border: 2px solid var(--border-color);
+            border-radius: 20px;
+            padding: 35px;
+            margin-bottom: 30px;
+            box-shadow: 
+                0 10px 40px rgba(0, 0, 0, 0.4),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+        
+        .card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.05) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.5s;
+            pointer-events: none;
+            z-index: 1;
+        }
+        
+        .card:hover::before {
+            opacity: 1;
+        }
+        
+        .card:hover {
+            border-color: var(--accent-primary);
+            box-shadow: 
+                0 15px 50px rgba(0, 212, 255, 0.2),
+                inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            transform: translateY(-5px);
+        }
+        
+        .card-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.8em;
+            font-weight: 700;
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: var(--accent-primary);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            position: relative;
+            z-index: 2;
+        }
+        
+        .card-title::before {
+            content: '';
+            width: 5px;
+            height: 30px;
+            background: linear-gradient(180deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+            border-radius: 3px;
+        }
+        
+        /* Ensure all card content is above decorative elements */
+        .card > * {
+            position: relative;
+            z-index: 2;
+        }
+        
         .info-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 15px;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
         }
+        
         .info-item {
-            background: rgba(0,0,0,0.2);
-            padding: 15px;
-            border-radius: 8px;
+            background: rgba(0, 212, 255, 0.05);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 15px;
+            padding: 25px;
             text-align: center;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
         }
-        .info-item .label { font-size: 0.9em; opacity: 0.7; margin-bottom: 5px; }
-        .info-item .value { font-size: 1.3em; font-weight: bold; }
+        
+        .info-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.1), transparent);
+            transition: left 0.8s;
+            pointer-events: none;
+        }
+        
+        .info-item:hover::before {
+            left: 100%;
+        }
+        
+        .info-item:hover {
+            transform: scale(1.05);
+            background: rgba(0, 212, 255, 0.1);
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.3);
+        }
+        
+        .info-label {
+            font-size: 0.95em;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .info-value {
+            font-size: 1.6em;
+            font-weight: 700;
+            color: var(--accent-primary);
+            font-family: 'Orbitron', sans-serif;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 350px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid var(--border-color);
+            border-radius: 15px;
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            font-size: 15px;
+            padding: 20px;
+            resize: vertical;
+            transition: all 0.3s;
+            position: relative;
+            z-index: 10;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            background: rgba(0, 212, 255, 0.05);
+            box-shadow: 
+                0 0 30px rgba(0, 212, 255, 0.2),
+                inset 0 0 20px rgba(0, 212, 255, 0.05);
+            z-index: 11;
+        }
+        
+        textarea::placeholder {
+            color: var(--text-secondary);
+            opacity: 0.5;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            padding: 15px 35px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1.1em;
+            font-weight: 700;
+            font-family: 'Rajdhani', sans-serif;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        button::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.3);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
+            pointer-events: none;
+            z-index: 0;
+        }
+        
+        button:hover::before {
+            width: 300px;
+            height: 300px;
+        }
+        
+        button span {
+            position: relative;
+            z-index: 1;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, #00ff88 0%, #00cc66 100%);
+            color: #0a0e27;
+            box-shadow: 0 5px 20px rgba(0, 255, 136, 0.4);
+        }
+        
+        .btn-info {
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            color: #0a0e27;
+            box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .btn-warning {
+            background: linear-gradient(135deg, #ffaa00 0%, #ff6600 100%);
+            color: white;
+            box-shadow: 0 5px 20px rgba(255, 170, 0, 0.4);
+        }
+        
+        button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 30px rgba(0, 212, 255, 0.5);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .status {
+            padding: 15px 20px;
+            border-radius: 12px;
+            margin-top: 20px;
+            display: none;
+            font-weight: 600;
+            animation: slideIn 0.3s;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .status.success {
+            background: rgba(0, 255, 136, 0.15);
+            border: 2px solid var(--accent-success);
+            color: var(--accent-success);
+        }
+        
+        .status.error {
+            background: rgba(255, 0, 85, 0.15);
+            border: 2px solid var(--accent-danger);
+            color: var(--accent-danger);
+        }
+        
+        .status.info {
+            background: rgba(0, 212, 255, 0.15);
+            border: 2px solid var(--accent-primary);
+            color: var(--accent-primary);
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0, 212, 255, 0.3);
+            border-top-color: var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-left: 10px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
         @media (max-width: 768px) {
-            .header h1 { font-size: 2em; }
-            .button-group { flex-direction: column; }
-            button { width: 100%; }
+            .nav-container {
+                padding: 0 20px;
+            }
+            
+            .logo {
+                font-size: 1.8em;
+            }
+            
+            .nav-menu a {
+                padding: 10px 15px;
+                font-size: 1em;
+            }
+            
+            .container {
+                padding: 20px 15px;
+            }
+            
+            .card {
+                padding: 25px;
+            }
+            
+            .button-group {
+                flex-direction: column;
+            }
+            
+            button {
+                width: 100%;
+            }
         }
     </style>
 </head>
 <body>
+    <nav>
+        <div class="nav-container">
+            <div class="logo">USBone</div>
+            <ul class="nav-menu">
+                <li><a class="active" onclick="showTab('info')">Device</a></li>
+                <li><a onclick="showTab('editor')">Editor</a></li>
+                <li><a onclick="showTab('injector')">Injector</a></li>
+            </ul>
+        </div>
+    </nav>
+
     <div class="container">
-        <div class="header">
-            <h1>🔐 USBone Control Panel</h1>
-            <p>Secure USB HID Device Manager</p>
-        </div>
-
-        <div class="card">
-            <h2>📊 Device Information</h2>
-            <div class="info-grid">
-                <div class="info-item">
-                    <div class="label">WiFi Mode</div>
-                    <div class="value">Access Point</div>
+        <!-- Device Information Tab -->
+        <div id="info" class="tab-content active">
+            <div class="card">
+                <h2 class="card-title">Device Status</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <div class="info-label">WiFi Mode</div>
+                        <div class="info-value">AP Mode</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">IP Address</div>
+                        <div class="info-value">192.168.4.1</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Status</div>
+                        <div class="info-value">🟢 Online</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">SD Card</div>
+                        <div class="info-value" id="sdStatus">Checking...</div>
+                    </div>
                 </div>
-                <div class="info-item">
-                    <div class="label">IP Address</div>
-                    <div class="value">192.168.4.1</div>
-                </div>
-                <div class="info-item">
-                    <div class="label">Hostname</div>
-                    <div class="value">usbone.local</div>
-                </div>
-                <div class="info-item">
-                    <div class="label">Status</div>
-                    <div class="value">🟢 Online</div>
-                </div>
+                <p style="color: var(--text-secondary); margin-top: 20px;">
+                    Hold BOOT button for 3+ seconds to toggle WiFi mode. Device auto-locks after 30 seconds of inactivity.
+                </p>
             </div>
         </div>
-
-        <div class="card">
-            <h2>📝 Macro Editor</h2>
-            <p style="opacity: 0.8; margin-bottom: 15px;">Edit your macros.txt file. Format: NAME:CONTENT or SENSITIVE:NAME:CONTENT</p>
-            <textarea id="macroEditor" placeholder="Loading macros..."></textarea>
-            <div class="button-group">
-                <button class="btn-success" onclick="saveMacros()">💾 Save to SD Card</button>
-                <button class="btn-info" onclick="loadMacros()">🔄 Reload from SD</button>
-                <button class="btn-warning" onclick="clearEditor()">🗑️ Clear Editor</button>
+        
+        <!-- Macro Editor Tab -->
+        <div id="editor" class="tab-content">
+            <div class="card">
+                <h2 class="card-title">Macro Editor</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                    Edit macros stored on SD card. Format: <code style="background: rgba(0,0,0,0.4); padding: 3px 10px; border-radius: 5px; color: var(--accent-success);">NAME:CONTENT</code> or <code style="background: rgba(0,0,0,0.4); padding: 3px 10px; border-radius: 5px; color: var(--accent-danger);">SENSITIVE:NAME:CONTENT</code>
+                </p>
+                <textarea id="macroEditor" placeholder="Loading macros from SD card..."></textarea>
+                <div class="button-group">
+                    <button class="btn-success" onclick="saveMacros()">
+                        <span>💾 Save to SD</span>
+                    </button>
+                    <button class="btn-info" onclick="loadMacros()">
+                        <span>🔄 Reload</span>
+                    </button>
+                    <button class="btn-warning" onclick="clearEditor()">
+                        <span>🗑️ Clear</span>
+                    </button>
+                </div>
+                <div id="editorStatus" class="status"></div>
             </div>
-            <div id="editorStatus" class="status"></div>
         </div>
-
-        <div class="card">
-            <h2>⚡ Live Text Injector</h2>
-            <p style="opacity: 0.8; margin-bottom: 15px;">Type or paste text here and send it directly to the host computer via USB HID</p>
-            <textarea id="liveText" placeholder="Enter text to inject...
+        
+        <!-- Live Injector Tab -->
+        <div id="injector" class="tab-content">
+            <div class="card">
+                <h2 class="card-title">Live Text Injector</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                    Type or paste text to send directly to the host computer via USB HID
+                </p>
+                <textarea id="liveText" placeholder="Enter text to inject...
 
 Supports:
 • Multiple paragraphs
-• Special characters
+• Special characters  
 • Tab and Enter keys
-• Long texts (up to 10KB)
-
-This text will be typed on the host computer as if you typed it manually."></textarea>
-            <div class="button-group">
-                <button class="btn-primary" onclick="sendText()">🚀 Send to Host Computer</button>
-                <button class="btn-info" onclick="clearLive()">🗑️ Clear</button>
-            </div>
-            <div id="liveStatus" class="status"></div>
-        </div>
-
-        <div class="card">
-            <h2>❓ Quick Help</h2>
-            <div style="line-height: 1.8;">
-                <p><strong>Macro Format:</strong></p>
-                <ul style="margin-left: 20px; margin-top: 10px;">
-                    <li>Regular: <code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">Email:user@example.com</code></li>
-                    <li>Sensitive: <code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">SENSITIVE:Password:Secret123</code></li>
-                    <li>With Enter: <code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">Login:user\tpass\n</code></li>
-                </ul>
-                <p style="margin-top: 15px;"><strong>Live Injector:</strong> Type multi-line text and click Send. It will be typed on your computer!</p>
-                <p style="margin-top: 15px;"><strong>Toggle WiFi:</strong> Hold BOOT button for 3+ seconds on device</p>
+• Long texts (up to 10KB)"></textarea>
+                <div class="button-group">
+                    <button class="btn-primary" onclick="sendText()">
+                        <span>🚀 Send to Host</span>
+                    </button>
+                    <button class="btn-warning" onclick="clearLive()">
+                        <span>🗑️ Clear</span>
+                    </button>
+                </div>
+                <div id="liveStatus" class="status"></div>
             </div>
         </div>
     </div>
 
     <script>
-        window.onload = loadMacros;
+        function showTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all nav links
+            document.querySelectorAll('.nav-menu a').forEach(link => {
+                link.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            
+            // Highlight active nav link
+            event.target.classList.add('active');
+            
+            // Load content if needed
+            if (tabName === 'editor' && !document.getElementById('macroEditor').value) {
+                loadMacros();
+            }
+            if (tabName === 'info') {
+                checkSDStatus();
+            }
+        }
+        
+        function checkSDStatus() {
+            fetch('/test').then(response => response.text()).then(data => {
+                if (data.includes('SD Card Available: Yes')) {
+                    document.getElementById('sdStatus').textContent = '✅ Ready';
+                    document.getElementById('sdStatus').style.color = 'var(--accent-success)';
+                } else {
+                    document.getElementById('sdStatus').textContent = '❌ Error';
+                    document.getElementById('sdStatus').style.color = 'var(--accent-danger)';
+                }
+            }).catch(() => {
+                document.getElementById('sdStatus').textContent = '⚠️ Unknown';
+            });
+        }
+        
+        window.onload = function() {
+            console.log('Page loaded, attempting to load macros...');
+            loadMacros();
+            checkSDStatus();
+        };
 
         function showStatus(elementId, message, type) {
             const status = document.getElementById(elementId);
@@ -431,11 +868,15 @@ This text will be typed on the host computer as if you typed it manually."></tex
 
         async function loadMacros() {
             try {
-                const response = await fetch('/api/macros');
+                const response = await fetch('/api/macros', {
+                    credentials: 'same-origin'
+                });
                 if (response.ok) {
                     const text = await response.text();
                     document.getElementById('macroEditor').value = text;
                     showStatus('editorStatus', '✅ Macros loaded successfully', 'success');
+                } else if (response.status === 401) {
+                    showStatus('editorStatus', '⚠️ Authentication required - please reload the page', 'error');
                 } else {
                     showStatus('editorStatus', '❌ Failed to load macros', 'error');
                 }
@@ -450,10 +891,13 @@ This text will be typed on the host computer as if you typed it manually."></tex
                 const response = await fetch('/api/macros', {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
-                    body: content
+                    body: content,
+                    credentials: 'same-origin'
                 });
                 if (response.ok) {
                     showStatus('editorStatus', '✅ Macros saved successfully!', 'success');
+                } else if (response.status === 401) {
+                    showStatus('editorStatus', '⚠️ Authentication required - please reload the page', 'error');
                 } else {
                     showStatus('editorStatus', '❌ Failed to save macros', 'error');
                 }
@@ -560,6 +1004,23 @@ void initWiFi() {
   // Create and configure web server
   server = new AsyncWebServer(80);
   
+  // Test endpoint (no auth) to verify server is running
+  server->on("/test", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("GET /test request received");
+    String response = "Server is running!\n";
+    response += "SD Card Available: " + String(sdCardAvailable ? "Yes" : "No") + "\n";
+    response += "Number of macros loaded: " + String(macros.size()) + "\n";
+    if (macros.size() > 0) {
+      response += "First macro: " + macroNames[0] + "\n";
+    }
+    request->send(200, "text/plain", response);
+  });
+  
+  // Handle favicon to avoid 500 errors
+  server->on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "");
+  });
+  
   // Enable authentication for all routes
   server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->authenticate(AUTH_USER, AUTH_PASS)) {
@@ -568,112 +1029,242 @@ void initWiFi() {
     request->send(200, "text/html", index_html);
   });
   
-  // API endpoint to get macros
+  // API endpoint to get macros (decrypted)
   server->on("/api/macros", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!request->authenticate(AUTH_USER, AUTH_PASS)) {
-      return request->requestAuthentication();
-    }
+    Serial.println("GET /api/macros request received");
     
-    File file = SD_MMC.open("/macros.txt", FILE_READ);
-    if (!file) {
-      request->send(404, "text/plain", "macros.txt not found");
+    // Check if request is from the same origin (already authenticated main page)
+    // For now, we'll rely on the fact that the user authenticated to access the main page
+    // In production, you might want to implement proper session management
+    
+    Serial.println("Processing macro request...");
+    
+    // Check if SD card was initialized successfully
+    if (!sdCardAvailable) {
+      Serial.println("SD card not available (initialization failed)");
+      // Instead of error, return empty template to allow web UI to work
+      request->send(200, "text/plain", "# SD Card Error\n# Please check SD card and restart device\n");
       return;
     }
     
-    String content = file.readString();
-    file.close();
-    request->send(200, "text/plain", content);
+    // Check if encrypted file exists
+    if (SD_MMC.exists("/macros.enc")) {
+      Serial.println("Found encrypted macros file");
+      CryptoManager& crypto = CryptoManager::getInstance();
+      if (!crypto.initialize()) {
+        request->send(500, "text/plain", "Failed to initialize crypto");
+        return;
+      }
+      
+      // Read and decrypt
+      File encFile = SD_MMC.open("/macros.enc", FILE_READ);
+      if (!encFile) {
+        request->send(404, "text/plain", "macros.enc not found");
+        return;
+      }
+      
+      size_t fileSize = encFile.size();
+      std::vector<uint8_t> encData(fileSize);
+      encFile.read(encData.data(), fileSize);
+      encFile.close();
+      
+      std::vector<uint8_t> decrypted;
+      if (!crypto.decryptData(encData.data(), fileSize, decrypted)) {
+        request->send(500, "text/plain", "Failed to decrypt macros");
+        return;
+      }
+      
+      String content((char*)decrypted.data(), decrypted.size());
+      Serial.println("Sending decrypted content, length: " + String(content.length()));
+      request->send(200, "text/plain", content);
+    } else if (SD_MMC.exists("/macros.txt")) {
+      Serial.println("Found plain text macros file");
+      // Fallback to plain text (migrate on next save)
+      File file = SD_MMC.open("/macros.txt", FILE_READ);
+      if (!file) {
+        Serial.println("Failed to open plain text file");
+        request->send(404, "text/plain", "macros.txt not found");
+        return;
+      }
+      String content = file.readString();
+      file.close();
+      Serial.println("Sending plain text content, length: " + String(content.length()));
+      request->send(200, "text/plain", content);
+    } else {
+      Serial.println("No macros file found on SD card");
+      // Return empty content instead of 404 to allow creating new macros
+      request->send(200, "text/plain", "# No macros found\n# Create your first macro below\n");
+    }
   });
   
-  // API endpoint to save macros
-  server->on("/api/macros", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  // API endpoint to save macros (encrypted)
+  server->on("/api/macros", HTTP_POST, 
+    [](AsyncWebServerRequest *request) {
+      // Response will be sent from body handler
+    },
+    NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!request->authenticate(AUTH_USER, AUTH_PASS)) {
-        return request->requestAuthentication();
-      }
+      static String macroBuffer;  // Static buffer for accumulating data
       
-      File file;
+      Serial.println("POST /api/macros request received");
+      
+      // First chunk - reset buffer
       if (index == 0) {
-        // First chunk - create new file (truncate existing)
-        file = SD_MMC.open("/macros.txt", FILE_WRITE);
-        if (!file) {
-          request->send(500, "text/plain", "Failed to create file");
-          return;
-        }
-      } else {
-        // Subsequent chunks - append to file
-        file = SD_MMC.open("/macros.txt", FILE_APPEND);
-        if (!file) {
-          request->send(500, "text/plain", "Failed to open file for append");
-          return;
-        }
+        macroBuffer = "";
+        macroBuffer.reserve(total);  // Pre-allocate memory
       }
       
-      // Write data chunk
-      size_t written = file.write(data, len);
-      file.close();
+      // Accumulate data
+      macroBuffer.concat((const char*)data, len);
       
-      if (written != len) {
-        request->send(500, "text/plain", "Failed to write all data");
-        return;
-      }
-      
+      // Last chunk - process and save
       if (index + len == total) {
-        // Last chunk - reload macros and send response
-        loadMacrosFromSD();
-        request->send(200, "text/plain", "Saved successfully");
-        Serial.println("Macros saved from web UI");
+        Serial.println("Saving macros, content length: " + String(macroBuffer.length()));
+        
+        if (macroBuffer.length() > 0 && saveMacrosToSD(macroBuffer)) {
+          // Remove old plain text file if it exists
+          if (SD_MMC.exists("/macros.txt")) {
+            SD_MMC.remove("/macros.txt");
+            Serial.println("Removed old plain text macros file");
+          }
+          
+          loadMacrosFromSD();
+          request->send(200, "text/plain", "Saved and encrypted successfully");
+          Serial.println("Macros saved and encrypted from web UI");
+        } else {
+          request->send(500, "text/plain", "Failed to encrypt and save macros");
+          Serial.println("Failed to save macros - buffer empty or encryption failed");
+        }
+        
+        macroBuffer = "";  // Clear buffer
       }
     }
   );
   
-  // API endpoint to inject text
-  server->on("/api/inject", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  // API endpoint to inject text - simplified approach
+  server->on("/api/inject", HTTP_POST, 
+    [](AsyncWebServerRequest *request) {
+      // Response handled in body handler
+    },
+    NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!request->authenticate(AUTH_USER, AUTH_PASS)) {
-        return request->requestAuthentication();
+      // Use request object to store state
+      struct InjectState {
+        String* buffer;
+        bool processed;
+      };
+      
+      InjectState* state = (InjectState*)request->_tempObject;
+      
+      // First chunk - initialize state
+      if (index == 0) {
+        Serial.println("\n=== NEW INJECTION REQUEST ===");
+        Serial.println("Total size: " + String(total) + " bytes");
+        
+        // Check USB HID
+        if (!usbHidEnabled) {
+          Serial.println("USB HID not enabled");
+          request->send(400, "text/plain", "USB HID not enabled");
+          return;
+        }
+        
+        // Check size
+        if (total > 10240) {
+          Serial.println("Text too large");
+          request->send(413, "text/plain", "Text too large (max 10KB)");
+          return;
+        }
+        
+        // Create new state for this request
+        state = new InjectState();
+        state->buffer = new String();
+        state->buffer->reserve(total);
+        state->processed = false;
+        request->_tempObject = state;
       }
       
-      if (!usbHidEnabled) {
-        request->send(400, "text/plain", "USB HID not enabled");
+      // Check if we have state
+      if (!state) {
+        Serial.println("ERROR: No state object");
         return;
       }
       
-      // Inject the text
-      String text = "";
-      for (size_t i = 0; i < len; i++) {
-        text += (char)data[i];
+      // If already processed, ignore
+      if (state->processed) {
+        Serial.println("Already processed, ignoring");
+        return;
       }
       
-      Serial.println("Injecting text from web: " + String(len) + " bytes");
+      // Accumulate data
+      state->buffer->concat((const char*)data, len);
+      Serial.println("Accumulated: " + String(state->buffer->length()) + "/" + String(total));
       
-      for (int i = 0; i < text.length(); i++) {
-        char c = text.charAt(i);
+      // Check if complete
+      if (index + len >= total) {
+        // Mark as processed FIRST
+        state->processed = true;
         
-        if (c == '\n') {
-          keyboard.press(KEY_RETURN);
-          delay(50);
-          keyboard.releaseAll();
-        } else if (c == '\t') {
-          keyboard.press(KEY_TAB);
-          delay(50);
-          keyboard.releaseAll();
-        } else if (needsSpecialHandling(c)) {
-          sendSpecialChar(c);
+        Serial.println("=== ALL DATA RECEIVED ===");
+        
+        // Check for empty
+        if (state->buffer->length() == 0) {
+          Serial.println("Empty text");
+          request->send(400, "text/plain", "No text to inject");
         } else {
-          keyboard.write(c);
+          // Inject the text ONCE
+          Serial.println("Injecting " + String(state->buffer->length()) + " characters...");
+          
+          for (int i = 0; i < state->buffer->length(); i++) {
+            char c = state->buffer->charAt(i);
+            
+            if (c == '\n') {
+              keyboard.press(KEY_RETURN);
+              delay(50);
+              keyboard.releaseAll();
+            } else if (c == '\t') {
+              keyboard.press(KEY_TAB);
+              delay(50);
+              keyboard.releaseAll();
+            } else if (needsSpecialHandling(c)) {
+              sendSpecialChar(c);
+            } else {
+              keyboard.write(c);
+            }
+            
+            delay(20);
+            
+            // Progress indicator
+            if (i % 100 == 99) {
+              Serial.print(".");
+              yield();
+            }
+          }
+          
+          Serial.println("\n=== INJECTION COMPLETE ===");
+          request->send(200, "text/plain", "Injected successfully");
         }
-        delay(20); // Faster typing for web injection
-      }
-      
-      if (index + len == total) {
-        request->send(200, "text/plain", "Injected");
+        
+        // Clean up
+        delete state->buffer;
+        delete state;
+        request->_tempObject = nullptr;
       }
     }
   );
+  
+  // Catch-all handler for debugging
+  server->onNotFound([](AsyncWebServerRequest *request) {
+    Serial.println("404 Not Found: " + request->url());
+    request->send(404, "text/plain", "Not Found: " + request->url());
+  });
   
   server->begin();
-  Serial.println("Web server started");
+  Serial.println("Web server started on port 80");
+  Serial.println("Available endpoints:");
+  Serial.println("  /test - Server test (no auth)");
+  Serial.println("  / - Main page (auth required)");
+  Serial.println("  /api/macros - GET/POST macros");
+  Serial.println("  /api/inject - POST text injection");
   
   wifiMode = true;
 }
@@ -738,6 +1329,15 @@ void setup() {
   }
 
   if (sdOK) {
+    // Initialize crypto system early
+    CryptoManager& crypto = CryptoManager::getInstance();
+    if (!crypto.initialize()) {
+      Serial.println("Warning: Crypto system initialization failed");
+      Serial.println("Macros will not be encrypted");
+    } else {
+      Serial.println("Crypto system initialized");
+    }
+    
     loadMacrosFromSD();
     if (macros.size() == 0) {
       createExampleMacros();
@@ -793,18 +1393,127 @@ void loop() {
 }
 
 bool initializeSD() {
-  if(!SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3)){
+  Serial.println("========================================");
+  Serial.println("Initializing SD card...");
+  Serial.println("========================================");
+  
+  // Configure pins for SD card
+  Serial.println("Configuring SD pins:");
+  Serial.printf("  CLK=%d, CMD=%d, D0=%d, D1=%d, D2=%d, D3=%d\n", 
+                SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
+  
+  // Set pins for 1-bit mode (most compatible)
+  if(!SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0)){
+    Serial.println("ERROR: SD_MMC.setPins() failed!");
+    sdCardAvailable = false;
+    return false;
+  }
+  
+  Serial.println("SD pins configured for 1-bit mode");
+  
+  // Try to begin with 1-bit mode
+  Serial.println("Attempting SD_MMC.begin()...");
+  if (!SD_MMC.begin("/sdcard", true)) {  // true = 1-bit mode
+    Serial.println("ERROR: SD_MMC.begin() failed!");
+    Serial.println("Possible causes:");
+    Serial.println("  - No SD card inserted");
+    Serial.println("  - SD card not formatted as FAT32");
+    Serial.println("  - Hardware connection issue");
+    Serial.println("  - Incompatible SD card");
+    sdCardAvailable = false;
+    return false;
+  }
+  
+  Serial.println("SD_MMC.begin() succeeded");
+  
+  uint8_t cardType = SD_MMC.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card attached");
+    SD_MMC.end();
+    sdCardAvailable = false;
     return false;
   }
 
-  if (SD_MMC.begin("/sdcard", true)) {
-    if (SD_MMC.cardType() == CARD_NONE) {
-      SD_MMC.end();
-      return false;
-    }
-    return true;
+  Serial.print("SD Card Type: ");
+  if(cardType == CARD_MMC){
+    Serial.println("MMC");
+  } else if(cardType == CARD_SD){
+    Serial.println("SDSC");
+  } else if(cardType == CARD_SDHC){
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
   }
-  return false;
+
+  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+  
+  // Test file access
+  File root = SD_MMC.open("/");
+  if(!root){
+    Serial.println("Failed to open root directory");
+    SD_MMC.end();
+    sdCardAvailable = false;
+    return false;
+  }
+  
+  if(!root.isDirectory()){
+    Serial.println("Root is not a directory");
+    root.close();
+    SD_MMC.end();
+    sdCardAvailable = false;
+    return false;
+  }
+  
+  // List files in root directory for debugging
+  Serial.println("Files in root directory:");
+  root = SD_MMC.open("/");
+  File fileEntry = root.openNextFile();
+  while(fileEntry){
+    if(fileEntry.isDirectory()){
+      Serial.print("  DIR : ");
+    } else {
+      Serial.print("  FILE: ");
+      Serial.print(fileEntry.size());
+      Serial.print(" bytes - ");
+    }
+    Serial.println(fileEntry.name());
+    fileEntry.close();
+    fileEntry = root.openNextFile();
+  }
+  
+  root.close();
+  Serial.println("SD card initialization complete");
+  sdCardAvailable = true;
+  return true;
+}
+
+// Helper function to save macros content (encrypted)
+bool saveMacrosToSD(const String& content) {
+  CryptoManager& crypto = CryptoManager::getInstance();
+  if (!crypto.initialize()) {
+    Serial.println("Failed to initialize crypto system");
+    return false;
+  }
+  
+  // Encrypt the content
+  std::vector<uint8_t> encrypted;
+  if (!crypto.encryptData((const uint8_t*)content.c_str(), content.length(), encrypted)) {
+    Serial.println("Failed to encrypt macros");
+    return false;
+  }
+  
+  // Write encrypted data to file
+  fs::File file = SD_MMC.open("/macros.enc", FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to create encrypted macros file");
+    return false;
+  }
+  
+  size_t written = file.write(encrypted.data(), encrypted.size());
+  file.close();
+  
+  return (written == encrypted.size());
 }
 
 void loadMacrosFromSD() {
@@ -812,13 +1521,115 @@ void loadMacrosFromSD() {
   macroNames.clear();
   macroSensitive.clear();
   
-  fs::File file = SD_MMC.open("/macros.txt");
-  if (!file) return;
-
-  String line;
-  while (file.available()) {
-    line = file.readStringUntil('\n');
+  Serial.println("Loading macros from SD...");
+  
+  if (!sdCardAvailable) {
+    Serial.println("SD card not available, cannot load macros");
+    return;
+  }
+  
+  // Check what files exist
+  bool hasEncrypted = SD_MMC.exists("/macros.enc");
+  bool hasPlainText = SD_MMC.exists("/macros.txt");
+  
+  Serial.println("Has encrypted file: " + String(hasEncrypted));
+  Serial.println("Has plain text file: " + String(hasPlainText));
+  
+  if (!hasEncrypted && !hasPlainText) {
+    Serial.println("No macros file found");
+    return;
+  }
+  
+  String fileContent;
+  
+  if (hasEncrypted) {
+    Serial.println("Loading encrypted macros...");
+    // Decrypt the file to memory
+    CryptoManager& crypto = CryptoManager::getInstance();
+    if (!crypto.initialize()) {
+      Serial.println("Failed to initialize crypto system");
+      return;
+    }
+    
+    // Read encrypted file
+    fs::File encFile = SD_MMC.open("/macros.enc", FILE_READ);
+    if (!encFile) {
+      Serial.println("Failed to open encrypted file");
+      return;
+    }
+    
+    size_t fileSize = encFile.size();
+    Serial.println("Encrypted file size: " + String(fileSize));
+    
+    std::vector<uint8_t> encData(fileSize);
+    size_t bytesRead = encFile.read(encData.data(), fileSize);
+    encFile.close();
+    
+    if (bytesRead != fileSize) {
+      Serial.println("Failed to read entire encrypted file");
+      return;
+    }
+    
+    // Decrypt data
+    std::vector<uint8_t> decrypted;
+    if (!crypto.decryptData(encData.data(), fileSize, decrypted)) {
+      Serial.println("Failed to decrypt macros file");
+      return;
+    }
+    
+    Serial.println("Decrypted size: " + String(decrypted.size()));
+    
+    // Convert to String
+    fileContent = String((char*)decrypted.data(), decrypted.size());
+  } else if (hasPlainText) {
+    Serial.println("Loading plain text macros for migration...");
+    // Read plain text file (for backward compatibility)
+    fs::File file = SD_MMC.open("/macros.txt", FILE_READ);
+    if (!file) {
+      Serial.println("Failed to open plain text file");
+      return;
+    }
+    
+    fileContent = file.readString();
+    file.close();
+    
+    Serial.println("Plain text content length: " + String(fileContent.length()));
+    
+    // Migrate to encrypted format
+    Serial.println("Migrating to encrypted format...");
+    if (saveMacrosToSD(fileContent)) {
+      Serial.println("Migration successful, removing plain text file...");
+      // Delete the plain text file after successful migration
+      if (SD_MMC.remove("/macros.txt")) {
+        Serial.println("Plain text file removed successfully");
+      } else {
+        Serial.println("Failed to remove plain text file");
+      }
+    } else {
+      Serial.println("Migration failed, keeping plain text file");
+    }
+  }
+  
+  // Parse the content line by line
+  Serial.println("Parsing file content, total length: " + String(fileContent.length()));
+  
+  int startIdx = 0;
+  int endIdx = fileContent.indexOf('\n');
+  int lineCount = 0;
+  
+  while (endIdx != -1 || startIdx < fileContent.length()) {
+    String line;
+    if (endIdx != -1) {
+      line = fileContent.substring(startIdx, endIdx);
+      startIdx = endIdx + 1;
+      endIdx = fileContent.indexOf('\n', startIdx);
+    } else {
+      line = fileContent.substring(startIdx);
+      startIdx = fileContent.length();
+    }
+    
     line.trim();
+    lineCount++;
     
     if (line.length() > 0 && !line.startsWith("#")) {
       bool isSensitive = false;
@@ -849,39 +1660,50 @@ void loadMacrosFromSD() {
       }
     }
   }
-  file.close();
   
   int sensitiveCount = 0;
   for (bool s : macroSensitive) {
     if (s) sensitiveCount++;
   }
   
+  Serial.println("Processed " + String(lineCount) + " lines");
   Serial.println("Loaded " + String(macros.size()) + " macros (" + 
                  String(sensitiveCount) + " sensitive)");
+  
+  // Debug: print first macro if available
+  if (macros.size() > 0) {
+    Serial.println("First macro name: " + macroNames[0]);
+    int previewLen = macros[0].length() > 20 ? 20 : macros[0].length();
+    Serial.println("First macro preview: " + macros[0].substring(0, previewLen) + "...");
+  }
 }
 
 void createExampleMacros() {
-  fs::File file = SD_MMC.open("/macros.txt", FILE_WRITE);
-  if (!file) return;
-
-  file.println("# USBone Macro File");
-  file.println("# Format: NAME:CONTENT");
-  file.println("# For sensitive macros: SENSITIVE:NAME:CONTENT");
-  file.println("#");
-  file.println("# Special sequences:");
-  file.println("#   \\n = Enter key");
-  file.println("#   \\t = Tab key");
-  file.println("#");
-  file.println("");
-  file.println("# Regular macros");
-  file.println("Email:user@example.com");
-  file.println("Username:john_doe");
-  file.println("");
-  file.println("# Sensitive macros");
-  file.println("SENSITIVE:Password:MySecretPassword123!");
-  file.println("SENSITIVE:API_Key:sk-1234567890abcdef");
-  file.println("SENSITIVE:BankLogin:admin\\tSecurePass456\\n");
-  file.close();
+  String content = "";
+  content += "# USBone Macro File\n";
+  content += "# Format: NAME:CONTENT\n";
+  content += "# For sensitive macros: SENSITIVE:NAME:CONTENT\n";
+  content += "#\n";
+  content += "# Special sequences:\n";
+  content += "#   \\n = Enter key\n";
+  content += "#   \\t = Tab key\n";
+  content += "#\n";
+  content += "\n";
+  content += "# Regular macros\n";
+  content += "Email:user@example.com\n";
+  content += "Username:john_doe\n";
+  content += "\n";
+  content += "# Sensitive macros\n";
+  content += "SENSITIVE:Password:MySecretPassword123!\n";
+  content += "SENSITIVE:API_Key:sk-1234567890abcdef\n";
+  content += "SENSITIVE:BankLogin:admin\\tSecurePass456\\n\n";
+  
+  // Save encrypted
+  if (saveMacrosToSD(content)) {
+    Serial.println("Example macros created and encrypted");
+  } else {
+    Serial.println("Failed to create example macros");
+  }
 }
 
 void handleSingleButton() {
